@@ -6,6 +6,11 @@ diffusers>=0.27
 transformers
 accelerate
 safetensors
+huggingface_hub
+sentencepiece
+sacremoses
+arabic_reshaper
+python-bidi
 realesrgan
 basicsr
 facexlib
