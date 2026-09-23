@@ -1,0 +1,6 @@
+outputs/
+models/*.pth
+models/*.bin
+__pycache__/
+*.pyc
+*.pyo

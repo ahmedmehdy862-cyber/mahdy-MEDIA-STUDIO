@@ -1,0 +1,6 @@
+gradio==6.28.0
+numpy==1.26.4
+Pillow
+opencv-python
+imageio
+imageio-ffmpeg

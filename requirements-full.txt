@@ -1,0 +1,12 @@
+# Full (image generation + Real-ESRGAN). Needs ~8GB download, install once with internet, then offline.
+# Python 3.10 or 3.11 recommended for torch CUDA on Windows. Your Quadro M1200 (Maxwell) works with CUDA 11.8 / 12.1 builds.
+-r requirements-min.txt
+torch torchvision --index-url https://download.pytorch.org/whl/cu121
+diffusers>=0.27
+transformers
+accelerate
+safetensors
+realesrgan
+basicsr
+facexlib
+gfpgan
