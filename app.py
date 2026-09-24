@@ -223,7 +223,10 @@ def make_design(bg: Image.Image, model_key, prompt, style, ar_text, size, seed,
     return bg, str(p)
 
 
-def generate_image(model_key, prompt, negative, steps, cfg, size, seed, style="بدون ستايل", auto_hq=False):
+def generate_image(model_key, prompt, negative, steps, cfg, size, seed, style="بدون ستايل", auto_hq=False, quality="✅ قياسي"):
+    if quality in QUALITY_PRESETS:
+        q = QUALITY_PRESETS[quality]
+        model_key, steps, cfg, auto_hq = q["model"], q["steps"], q["cfg"], q["hq"]
     if not SD_AVAILABLE:
         raise gr.Error(f"مكتبة التوليد غير مثبتة. ثبت requirements-full ثم أعد التشغيل. التفاصيل: {SD_ERROR}")
     if not prompt or not prompt.strip():
@@ -247,8 +250,7 @@ def generate_image(model_key, prompt, negative, steps, cfg, size, seed, style="�
     img = out.images[0]
     if auto_hq:
         # تحسين تلقائي + تكبير 2x بعد التوليد (جودة أعلى بدون تدخل)
-        img, _ = enhance_image(img, 0.7, 0.4, 1.0)
-        img, _ = upscale_image(img, 2, False)
+        img = apply_quality(img, auto_hq if isinstance(auto_hq, str) else "full")
     p = OUT / f"sd_{int(time.time())}_{seed}.png"
     img.save(p)
     if torch.cuda.is_available():
@@ -341,6 +343,86 @@ def upscale_image(img: Image.Image, scale: int, use_esrgan: bool):
     return res, str(p)
 
 
+# ---------- مستويات جودة جاهزة (إعدادات قوية مضبوطة لكارتك) ----------
+QUALITY_PRESETS = {
+    "⚡ سريع":      {"model": "sd-turbo", "steps": 1,  "cfg": 0.0, "hq": False, "note": "تجربة سريعة"},
+    "✅ قياسي":     {"model": "sd-turbo", "steps": 2,  "cfg": 0.0, "hq": "enhance", "note": "توازن سرعة/جودة"},
+    "💎 عالي":      {"model": "sd-turbo", "steps": 4,  "cfg": 0.0, "hq": "full", "note": "تحسين + تكبير 2x"},
+    "👑 فائق":      {"model": "sd15",     "steps": 28, "cfg": 7.5, "hq": "full", "note": "أفضل جودة (أبطأ)"},
+}
+
+ENHANCE_LEVELS = {
+    "خفيف": (0.4, 0.25, 0.6),
+    "متوسط": (0.7, 0.4, 1.0),
+    "قوي": (1.1, 0.6, 1.6),
+}
+
+
+def apply_quality(img: Image.Image, hq):
+    if hq == "enhance":
+        img, _ = enhance_image(img, 0.7, 0.4, 1.0)
+    elif hq == "full":
+        img, _ = enhance_image(img, 0.7, 0.4, 1.0)
+        img, _ = upscale_image(img, 2, False)
+    return img
+
+
+# ---------- تفريغ الخلفية + تصدير (JPG / PNG شفاف) ----------
+def remove_bg(img: Image.Image) -> Image.Image:
+    from rembg import remove
+    return remove(img.convert("RGB"))
+
+
+def export_image(img: Image.Image, fmt: str, jpg_q: int, transparent: bool, prefix="export"):
+    if img is None:
+        raise gr.Error("لا توجد صورة للتصدير.")
+    if transparent:
+        img = remove_bg(img)  # RGBA
+        fmt = "PNG"
+    if fmt == "JPG":
+        img = img.convert("RGB")
+        p = OUT / f"{prefix}_{int(time.time())}.jpg"
+        img.save(p, quality=int(jpg_q))
+    else:
+        p = OUT / f"{prefix}_{int(time.time())}.png"
+        img.save(p)
+    return Image.open(p), str(p)
+
+
+def produce_image(prompt, style, quality, shape, fmt, jpg_q, transparent, seed):
+    """إنتاج بصيغة جاهزة: توليد بالجودة المختارة ثم تصدير JPG/PNG (مفرغ اختياري)."""
+    size = {"مربع": "512x512", "طولي": "512x768", "عرضي": "768x512"}[shape]
+    img, _, note = generate_image("sd-turbo", prompt, "", 2, 0.0, size, int(seed), style, False, quality)
+    out_img, out_path = export_image(img, fmt, int(jpg_q), bool(transparent), "studio")
+    return out_img, out_path, note
+
+
+def produce_design(bg, prompt, style, quality, ar_text, fsize, color_hex, position, fmt, jpg_q, transparent, seed):
+    if bg is None:
+        if not (prompt or "").strip():
+            raise gr.Error("ارفع خلفية أو اكتب وصفا لتوليدها.")
+        bg, _, _ = generate_image("sd-turbo", prompt, "", 2, 0.0, "512x512", int(seed), style, False, quality)
+    else:
+        bg = bg.convert("RGB")
+    if (ar_text or "").strip():
+        c = tuple(int(color_hex[i:i + 2], 16) for i in (1, 3, 5))
+        bg = draw_arabic(bg, ar_text.strip(), int(fsize), c, position, 2)
+    if transparent:
+        bg = remove_bg(bg)
+        fmt = "PNG"
+    return export_image(bg, fmt, int(jpg_q), False, "design")
+
+
+def produce_enhance(img, level, up2x, fmt, jpg_q, transparent):
+    if img is None:
+        raise gr.Error("ارفع صورة أولا.")
+    d, c, k = ENHANCE_LEVELS[level]
+    img, _ = enhance_image(img.convert("RGB"), d, c, k)
+    if up2x:
+        img, _ = upscale_image(img, 2, False)
+    return export_image(img, fmt, int(jpg_q), bool(transparent), "enhanced")
+
+
 # ---------- Video: cinematic from image + enhance video ----------
 def image_to_video(img: Image.Image, seconds: int, fps: int, zoom: float, width: int, ar_text: str = ""):
     """فيديو سينمائي (Ken Burns زوم بطيء) من صورة + نص عربي اختياري ثابت على الفيديو."""
@@ -428,87 +510,75 @@ with gr.Blocks(title="Local Studio - استوديو محلي") as demo:
     gr.Markdown("# 🎬 Local Studio — يعمل محليا Offline\nجهازك: Quadro M1200 4GB — الإعدادات مضبوطة لتفادي التوشية والـ OOM.")
     if not SD_AVAILABLE:
         gr.Markdown(f"⚠️ **وضع خفيف:** مكتبات التوليد (torch/diffusers) غير مثبتة — تبويبات التحسين والـ Upscale والفيديو تعمل الآن. لتفعيل توليد الصور ثبت `requirements-full.txt`. ({SD_ERROR[:150]})")
+    gr.Markdown("# 🎬 الاستوديو — إنشاء وتحسين بضغطة واحدة\nاكتب وصفا بالعربي أو الإنجليزية، اختر الجودة والصيغة، ودوس توليد.")
     with gr.Tabs():
-        with gr.Tab("🖼️ توليد صور"):
-            md = gr.Dropdown(choices=["sd-turbo", "sd15"], value="sd-turbo",
-                             label="الموديل (Turbo أسرع ومناسب لكارتك — يُحمّل أول مرة بإنترنت ثم offline)")
-            pr = gr.Textbox(label="الوصف — عربي أو إنجليزي (العربي يُترجم تلقائيا)", lines=3, placeholder="بحيرة جبلية وقت الشروق... أو mountain lake at sunrise...")
+        with gr.Tab("🎨 إنشاء صورة"):
+            pr = gr.Textbox(label="اوصف الصورة (عربي أو إنجليزي)", lines=3, placeholder="مثال: أسد ذهبي في صحراء وقت الغروب...")
             with gr.Row():
-                sy = gr.Dropdown(choices=list(STYLES.keys()), value="واقعي فائق", label="ستايل (بوستر جودة)")
-                hq = gr.Checkbox(value=True, label="جودة عالية تلقائيا (تحسين + تكبير 2x بعد التوليد)")
-            ng = gr.Textbox(label="Negative prompt", value=DEFAULT_NEGATIVE, lines=2)
+                sy = gr.Dropdown(choices=list(STYLES.keys()), value="واقعي فائق", label="الستايل")
+                q1 = gr.Radio(choices=list(QUALITY_PRESETS.keys()), value="✅ قياسي", label="مستوى الجودة")
             with gr.Row():
-                st = gr.Slider(1, 50, 2, step=1, label="خطوات (Turbo: 2 — SD1.5: 28)")
-                cf = gr.Slider(0, 12, 0.0, step=0.5, label="CFG (Turbo: 0 — SD1.5: 7.5)")
-                sz = gr.Dropdown(["512x512", "512x768", "768x512"], value="512x512", label="المقاس (لا تتجاوز 512 على 4GB)")
-                sd = gr.Number(value=42, label="Seed", precision=0)
-            b1 = gr.Button("توليد", variant="primary")
-            tr1 = gr.Textbox(label="الفهم (الترجمة للعربي)", interactive=False)
+                sh1 = gr.Radio(choices=["مربع", "طولي", "عرضي"], value="مربع", label="المقاس")
+                fm1 = gr.Radio(choices=["JPG", "PNG"], value="JPG", label="نوع الملف")
+                jq1 = gr.Slider(60, 100, 92, step=1, label="جودة JPG")
+            with gr.Row():
+                tr1c = gr.Checkbox(value=False, label="خلفية مفرغة PNG شفاف (للأشخاص والمنتجات)")
+                sd1 = gr.Number(value=42, label="Seed (غيّره لنتيجة مختلفة)", precision=0)
+            b1 = gr.Button("✨ توليد", variant="primary")
+            tr1 = gr.Textbox(label="الفهم", interactive=False)
             im1 = gr.Image(label="النتيجة")
-            f1 = gr.File(label="تحميل")
-            b1.click(generate_image, [md, pr, ng, st, cf, sz, sd, sy, hq], [im1, f1, tr1])
+            f1 = gr.File(label="تحميل الملف")
+            b1.click(produce_image, [pr, sy, q1, sh1, fm1, jq1, tr1c, sd1], [im1, f1, tr1])
         with gr.Tab("✍️ تصميم بنص عربي"):
-            gr.Markdown("خلفية (مولّدة أو مرفوعة) + **نص عربي واضح بخط أميري** — موديلات التوليد لا ترسم الحروف العربية سليمة، لذلك نضيف النص بدقة كاملة بعد التوليد.")
-            dg_bg = gr.Image(type="pil", label="خلفية مرفوعة (اختياري — اتركها فاضية للتوليد)")
+            dg_bg = gr.Image(type="pil", label="صورة خلفية (اختياري — سيبها فاضية للتوليد)")
+            dg_pr = gr.Textbox(label="وصف الخلفية", lines=2, placeholder="سماء ليلية بالنجوم...")
+            dg_tx = gr.Textbox(label="النص العربي", lines=1, placeholder="كوكب الزحالف")
             with gr.Row():
-                dg_md = gr.Dropdown(choices=["sd-turbo", "sd15"], value="sd-turbo", label="موديل الخلفية")
-                dg_sz = gr.Dropdown(["512x512", "512x768", "768x512"], value="512x512", label="مقاس الخلفية")
-                dg_seed = gr.Number(value=7, label="Seed", precision=0)
-            dg_pr = gr.Textbox(label="وصف الخلفية (عربي أو إنجليزي)", lines=2, placeholder="سماء ليلية بالنجوم...")
-            dg_sy = gr.Dropdown(choices=list(STYLES.keys()), value="سينمائي", label="ستايل الخلفية")
-            dg_tx = gr.Textbox(label="النص العربي", lines=2, placeholder="كوكب الزحالف 🌙")
+                dg_sy = gr.Dropdown(choices=list(STYLES.keys()), value="سينمائي", label="الستايل")
+                dg_q = gr.Radio(choices=list(QUALITY_PRESETS.keys()), value="✅ قياسي", label="الجودة")
             with gr.Row():
                 dg_fs = gr.Slider(24, 160, 72, step=2, label="حجم الخط")
-                dg_cl = gr.ColorPicker(value="#FFFFFF", label="لون النص")
-                dg_ps = gr.Dropdown(["أعلى", "وسط", "أسفل"], value="أسفل", label="مكان النص")
-                dg_sw = gr.Slider(0, 6, 2, step=1, label="حدود سوداء (تمنع الاختفاء)")
-            bdg = gr.Button("عمل التصميم", variant="primary")
+                dg_cl = gr.ColorPicker(value="#FFFFFF", label="اللون")
+                dg_ps = gr.Dropdown(["أعلى", "وسط", "أسفل"], value="أسفل", label="المكان")
+            with gr.Row():
+                dg_fm = gr.Radio(choices=["JPG", "PNG"], value="PNG", label="نوع الملف")
+                dg_jq = gr.Slider(60, 100, 95, step=1, label="جودة JPG")
+                dg_tr = gr.Checkbox(value=False, label="خلفية مفرغة PNG شفاف (للأشخاص والمنتجات)")
+            bdg = gr.Button("✨ عمل التصميم", variant="primary")
             imdg = gr.Image(label="التصميم")
-            fdg = gr.File(label="تحميل")
-            bdg.click(make_design, [dg_bg, dg_md, dg_pr, dg_sy, dg_tx, dg_sz, dg_seed, dg_fs, dg_cl, dg_ps, dg_sw], [imdg, fdg])
-        with gr.Tab("✨ تحسين جودة (بدون توشية)"):
-            i2 = gr.Image(type="pil", label="الصورة الأصلية")
+            fdg = gr.File(label="تحميل الملف")
+            bdg.click(produce_design, [dg_bg, dg_pr, dg_sy, dg_q, dg_tx, dg_fs, dg_cl, dg_ps, dg_fm, dg_jq, dg_tr, gr.Number(value=7, visible=False, precision=0)], [imdg, fdg])
+        with gr.Tab("✨ تحسين صورة"):
+            i2 = gr.Image(type="pil", label="ارفع الصورة")
             with gr.Row():
-                d2 = gr.Slider(0, 2, 0.7, label="إزالة نويز (0.7 آمن)")
-                c2 = gr.Slider(0, 1, 0.4, label="وضوح (0.4 يمنع الهالات)")
-                k2 = gr.Slider(0, 3, 1.0, label="تباين لطيف")
-            b2 = gr.Button("تحسين", variant="primary")
+                lv2 = gr.Radio(choices=["خفيف", "متوسط", "قوي"], value="متوسط", label="قوة التحسين")
+                up2 = gr.Checkbox(value=True, label="تكبير 2x مع التحسين")
+            with gr.Row():
+                fm2 = gr.Radio(choices=["JPG", "PNG"], value="JPG", label="نوع الملف")
+                jq2 = gr.Slider(60, 100, 92, step=1, label="جودة JPG")
+                tr2c = gr.Checkbox(value=False, label="خلفية مفرغة PNG شفاف (للأشخاص والمنتجات)")
+            b2 = gr.Button("✨ تحسين", variant="primary")
             im2 = gr.Image(label="بعد التحسين")
-            f2 = gr.File(label="تحميل")
-            b2.click(enhance_image, [i2, d2, c2, k2], [im2, f2])
-        with gr.Tab("🔍 Upscale تكبير"):
-            i3 = gr.Image(type="pil", label="الصورة")
-            with gr.Row():
-                s3 = gr.Radio([2, 4], value=2, label="مقياس التكبير")
-                e3 = gr.Checkbox(value=False, label=f"استخدام Real-ESRGAN (متاح: {ESRGAN_AVAILABLE})")
-            b3 = gr.Button("تكبير", variant="primary")
-            im3 = gr.Image(label="مكبرة")
-            f3 = gr.File(label="تحميل")
-            b3.click(upscale_image, [i3, s3, e3], [im3, f3])
+            f2 = gr.File(label="تحميل الملف")
+            b2.click(produce_enhance, [i2, lv2, up2, fm2, jq2, tr2c], [im2, f2])
         with gr.Tab("🎥 فيديو"):
-            gr.Markdown("**أ:** فيديو سينمائي من صورة (يعمل الآن) — **ب:** تكبير وتنقية فيديو موجود")
             i4 = gr.Image(type="pil", label="صورة البداية")
-            tx4 = gr.Textbox(label="نص عربي ثابت على الفيديو (اختياري)", placeholder="كوكب الزحالف")
+            tx4 = gr.Textbox(label="نص عربي على الفيديو (اختياري)", placeholder="كوكب الزحالف")
             with gr.Row():
-                du = gr.Slider(2, 15, 5, step=1, label="المدة (ثواني)")
-                fp = gr.Radio([24, 30], value=24, label="FPS")
-                zm = gr.Slider(0, 0.3, 0.12, label="قوة الزوم (0.12 ناعم)")
-                wd = gr.Radio([640, 960, 1280], value=960, label="العرض")
-            b4 = gr.Button("إنشاء فيديو", variant="primary")
+                du = gr.Radio([3, 5, 10], value=5, label="المدة (ثواني)")
+                wd = gr.Radio([640, 960], value=960, label="الجودة (العرض)")
+            b4 = gr.Button("✨ إنشاء فيديو", variant="primary")
             v4 = gr.Video(label="الفيديو")
             f4 = gr.File(label="تحميل")
-            b4.click(image_to_video, [i4, du, fp, zm, wd, tx4], [v4, f4])
+            b4.click(image_to_video, [i4, du, gr.Number(value=24, visible=False, precision=0), gr.Number(value=0.12, visible=False), wd, tx4], [v4, f4])
             gr.Markdown("---")
-            v5 = gr.Video(label="فيديو للتحسين")
-            with gr.Row():
-                s5 = gr.Radio([1, 2], value=1, label="تكبير")
-                n5 = gr.Checkbox(value=True, label="إزالة نويز خفيفة")
+            v5 = gr.Video(label="فيديو للتحسين (تنقية + تكبير)")
             b5 = gr.Button("تحسين الفيديو")
             v6 = gr.Video(label="بعد التحسين")
             f6 = gr.File(label="تحميل")
-            b5.click(enhance_video, [v5, s5, n5], [v6, f6])
-        with gr.Tab("📦 الموديلات المجانية"):
-            gr.Markdown("موديلات مجانية مفتوحة المصدر — تحميل مرة واحدة بإنترنت، ثم تعمل **offline**. كلها مختارة على مقاس Quadro M1200 4GB.")
+            b5.click(enhance_video, [v5, gr.Number(value=2, visible=False, precision=0), gr.Checkbox(value=True, visible=False)], [v6, f6])
+        with gr.Tab("📦 الموديلات"):
+            gr.Markdown("موديلات مجانية مفتوحة المصدر — تحميل مرة واحدة بإنترنت، ثم تعمل **offline**.")
             st_md = gr.Markdown(value="اضغط تحديث لعرض الحالة.")
             b_ref = gr.Button("تحديث الحالة")
             b_ref.click(lambda: models_status(), outputs=[st_md])
