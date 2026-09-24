@@ -4,3 +4,6 @@ models/*.bin
 __pycache__/
 *.pyc
 *.pyo
+.gradio/
+share.log
+share.err
